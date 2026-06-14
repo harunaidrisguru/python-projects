@@ -1,0 +1,348 @@
+# EtherPy - Ethereum Blockchain Interaction Library
+# Comprehensive Python library for Ethereum operations
+
+import requests
+from typing import Optional, Dict, Any, List
+from utils import (
+    format_balance, wei_to_eth, eth_to_wei, format_address, 
+    is_valid_address, calculate_tx_fee, format_gas_price
+)
+from config import NETWORKS, GAS_DEFAULTS
+
+
+class EtherPyException(Exception):
+    """Base exception for EtherPy library"""
+    pass
+
+
+class InvalidAddressError(EtherPyException):
+    """Raised when an invalid Ethereum address is provided"""
+    pass
+
+
+class NetworkError(EtherPyException):
+    """Raised when network request fails"""
+    pass
+
+
+class EtherPy:
+    """
+    Main EtherPy class for Ethereum blockchain interactions
+    
+    Example:
+        >>> eth = EtherPy(network="mainnet")
+        >>> balance = eth.get_balance("0x742d35Cc6634C0532925a3b844Bc9e7595f42dA")
+        >>> print(balance)
+    """
+    
+    def __init__(self, endpoint: Optional[str] = None, network: str = "mainnet"):
+        """
+        Initialize EtherPy instance
+        
+        Args:
+            endpoint: Custom RPC endpoint URL
+            network: Predefined network name (mainnet, sepolia, polygon, etc.)
+        """
+        if endpoint:
+            self.endpoint = endpoint
+            self.network_name = "custom"
+        elif network in NETWORKS:
+            network_config = NETWORKS[network]
+            self.endpoint = network_config["endpoint"]
+            self.network_name = network
+            self.chain_id = network_config["chain_id"]
+            self.currency = network_config["currency"]
+        else:
+            raise EtherPyException(f"Unknown network: {network}")
+    
+    def _make_request(self, method: str, params: List[Any] = None) -> Dict[str, Any]:
+        """
+        Make JSON-RPC request to Ethereum node
+        
+        Args:
+            method: JSON-RPC method name
+            params: Parameters for the method
+        
+        Returns:
+            Response data
+        
+        Raises:
+            NetworkError: If request fails
+        """
+        if params is None:
+            params = []
+        
+        payload = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+            "id": 1,
+        }
+        
+        try:
+            response = requests.post(
+                self.endpoint,
+                json=payload,
+                timeout=10
+            )
+            response.raise_for_status()
+            data = response.json()
+            
+            if "error" in data:
+                raise NetworkError(f"RPC Error: {data['error']['message']}")
+            
+            return data.get("result")
+        
+        except requests.exceptions.RequestException as e:
+            raise NetworkError(f"Failed to connect to {self.endpoint}: {str(e)}")
+    
+    def get_balance(self, address: str, block: str = "latest") -> Dict[str, Any]:
+        """
+        Get ETH balance for an address
+        
+        Args:
+            address: Ethereum address
+            block: Block number or "latest"
+        
+        Returns:
+            Dictionary with balance info
+        """
+        if not is_valid_address(address):
+            raise InvalidAddressError(f"Invalid address: {address}")
+        
+        address = format_address(address)
+        balance_wei = self._make_request("eth_getBalance", [address, block])
+        balance_eth = wei_to_eth(balance_wei)
+        
+        return {
+            "address": address,
+            "balance_wei": balance_wei,
+            "balance_eth": str(balance_eth),
+            "formatted": format_balance(balance_wei),
+            "block": block
+        }
+    
+    def get_nonce(self, address: str, block: str = "latest") -> int:
+        """
+        Get transaction count (nonce) for an address
+        
+        Args:
+            address: Ethereum address
+            block: Block number or "latest"
+        
+        Returns:
+            Transaction count
+        """
+        if not is_valid_address(address):
+            raise InvalidAddressError(f"Invalid address: {address}")
+        
+        address = format_address(address)
+        nonce = self._make_request("eth_getTransactionCount", [address, block])
+        return int(nonce, 16)
+    
+    def get_gas_price(self) -> Dict[str, Any]:
+        """
+        Get current gas price
+        
+        Returns:
+            Dictionary with gas price in Wei and Gwei
+        """
+        gas_price_wei = self._make_request("eth_gasPrice")
+        gas_price_gwei = format_gas_price(int(gas_price_wei, 16))
+        
+        return {
+            "gas_price_wei": int(gas_price_wei, 16),
+            "gas_price_gwei": float(gas_price_gwei),
+            "formatted": f"{gas_price_gwei:.2f} Gwei"
+        }
+    
+    def get_block(self, block: str = "latest") -> Dict[str, Any]:
+        """
+        Get block information
+        
+        Args:
+            block: Block number or "latest"
+        
+        Returns:
+            Block data
+        """
+        block_data = self._make_request("eth_getBlockByNumber", [block, False])
+        
+        if not block_data:
+            raise NetworkError(f"Block not found: {block}")
+        
+        return {
+            "number": int(block_data["number"], 16),
+            "hash": block_data["hash"],
+            "timestamp": int(block_data["timestamp"], 16),
+            "miner": block_data["miner"],
+            "gas_used": int(block_data["gasUsed"], 16),
+            "gas_limit": int(block_data["gasLimit"], 16),
+            "transaction_count": len(block_data["transactions"]),
+            "difficulty": int(block_data["difficulty"], 16),
+        }
+    
+    def get_transaction(self, tx_hash: str) -> Dict[str, Any]:
+        """
+        Get transaction details
+        
+        Args:
+            tx_hash: Transaction hash
+        
+        Returns:
+            Transaction data
+        """
+        tx_data = self._make_request("eth_getTransactionByHash", [tx_hash])
+        
+        if not tx_data:
+            raise NetworkError(f"Transaction not found: {tx_hash}")
+        
+        return {
+            "hash": tx_data["hash"],
+            "from": tx_data["from"],
+            "to": tx_data["to"],
+            "value": wei_to_eth(int(tx_data["value"], 16)),
+            "value_wei": int(tx_data["value"], 16),
+            "gas": int(tx_data["gas"], 16),
+            "gas_price": format_gas_price(int(tx_data["gasPrice"], 16)),
+            "gas_price_wei": int(tx_data["gasPrice"], 16),
+            "block_number": int(tx_data["blockNumber"], 16) if tx_data["blockNumber"] else None,
+            "nonce": int(tx_data["nonce"], 16),
+        }
+    
+    def get_transaction_receipt(self, tx_hash: str) -> Dict[str, Any]:
+        """
+        Get transaction receipt (status, gas used, logs)
+        
+        Args:
+            tx_hash: Transaction hash
+        
+        Returns:
+            Receipt data
+        """
+        receipt = self._make_request("eth_getTransactionReceipt", [tx_hash])
+        
+        if not receipt:
+            raise NetworkError(f"Receipt not found: {tx_hash}")
+        
+        gas_used = int(receipt["gasUsed"], 16)
+        gas_price_wei = int(receipt["gasPrice"], 16) if "gasPrice" in receipt else 0
+        tx_fee = calculate_tx_fee(gas_used, gas_price_wei)
+        
+        return {
+            "hash": receipt["transactionHash"],
+            "block_number": int(receipt["blockNumber"], 16),
+            "from": receipt["from"],
+            "to": receipt["to"],
+            "status": int(receipt["status"], 16),  # 1 = success, 0 = failed
+            "gas_used": gas_used,
+            "gas_limit": int(receipt["gas"], 16),
+            "transaction_fee": str(tx_fee),
+            "logs": receipt["logs"],
+            "contract_address": receipt.get("contractAddress"),
+        }
+    
+    def estimate_gas(self, from_addr: str, to_addr: str, value: str = "0", data: str = "0x") -> int:
+        """
+        Estimate gas required for a transaction
+        
+        Args:
+            from_addr: From address
+            to_addr: To address
+            value: Value in ETH
+            data: Data payload (default empty)
+        
+        Returns:
+            Estimated gas amount
+        """
+        if not is_valid_address(from_addr) or not is_valid_address(to_addr):
+            raise InvalidAddressError("Invalid from or to address")
+        
+        from_addr = format_address(from_addr)
+        to_addr = format_address(to_addr)
+        
+        value_wei = hex(eth_to_wei(value))
+        
+        tx_object = {
+            "from": from_addr,
+            "to": to_addr,
+            "value": value_wei,
+            "data": data
+        }
+        
+        estimated_gas = self._make_request("eth_estimateGas", [tx_object])
+        return int(estimated_gas, 16)
+    
+    def call(self, to_addr: str, data: str, from_addr: str = None, block: str = "latest") -> str:
+        """
+        Execute a contract call (read-only)
+        
+        Args:
+            to_addr: Contract address
+            data: Encoded function call data
+            from_addr: Caller address (optional)
+            block: Block number or "latest"
+        
+        Returns:
+            Return data as hex string
+        """
+        if not is_valid_address(to_addr):
+            raise InvalidAddressError(f"Invalid contract address: {to_addr}")
+        
+        to_addr = format_address(to_addr)
+        
+        call_object = {
+            "to": to_addr,
+            "data": data,
+        }
+        
+        if from_addr:
+            if not is_valid_address(from_addr):
+                raise InvalidAddressError(f"Invalid from address: {from_addr}")
+            call_object["from"] = format_address(from_addr)
+        
+        return self._make_request("eth_call", [call_object, block])
+    
+    def get_network_info(self) -> Dict[str, Any]:
+        """Get information about the connected network"""
+        return {
+            "network": self.network_name,
+            "endpoint": self.endpoint,
+            "chain_id": getattr(self, "chain_id", "unknown"),
+            "currency": getattr(self, "currency", "unknown"),
+        }
+    
+    def get_accounts(self) -> List[str]:
+        """
+        Get list of accounts (only works with local nodes)
+        
+        Returns:
+            List of account addresses
+        """
+        try:
+            accounts = self._make_request("eth_accounts")
+            return accounts or []
+        except:
+            return []
+    
+    def get_accounts_balance(self, addresses: List[str]) -> List[Dict[str, Any]]:
+        """
+        Get balances for multiple addresses
+        
+        Args:
+            addresses: List of Ethereum addresses
+        
+        Returns:
+            List of balance dictionaries
+        """
+        balances = []
+        for address in addresses:
+            try:
+                balance = self.get_balance(address)
+                balances.append(balance)
+            except Exception as e:
+                balances.append({
+                    "address": address,
+                    "error": str(e)
+                })
+        return balances
